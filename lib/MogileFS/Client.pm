@@ -1,21 +1,85 @@
 #!/usr/bin/perl
 package MogileFS::Client;
 
+=head1 NAME
+
+MogileFS::Client - Client library for the MogileFS distributed file system.
+
+=head1 SYNOPSIS
+
+ use MogileFS::Client;
+
+ # create client object w/ server-configured namespace and IPs of trackers
+ $mogc = MogileFS::Client->new(domain => "foo.com::my_namespace",
+                               hosts  => ['10.0.0.2', '10.0.0.3']);
+
+ # create a file
+ $key   = "image_of_userid:$userid";   # mogile is a flat namespace.  no paths.
+ $class = "user_images";               # must be configured on server
+ $fh = $mogc->new_file($key, $class);
+
+ print $fh $data;
+
+ unless ($fh->close) {
+    die "Error writing file: " . $mogc->errcode . ": " . $mogc->errstr;
+ }
+
+ # Find the URLs that the file was replicated to.  May change over time.
+ @urls = $mogc->get_paths($key);
+
+ # no longer want it?
+ $mogc->delete($key);
+
+=head1 DESCRIPTION
+
+This module is a client library for the MogileFS distributed file system. The class method 'new' creates a client object against a
+particular mogilefs tracker and domain. This object may then be used to store and retrieve content easily from MogileFS.
+
+=cut
+
 use strict;
 use Carp;
 use IO::WrapTie;
 use LWP::UserAgent;
-use fields ('root',      # filesystem root.  only needed for now-deprecated NFS mode.  don't use.
+use fields (
             'domain',    # scalar: the MogileFS domain (namespace).
             'backend',   # MogileFS::Backend object
             'readonly',  # bool: if set, client won't permit write actions/etc.  just reads.
+            'hooks',     # hash: hookname -> coderef
             );
 use Time::HiRes ();
 use MogileFS::Backend;
 use MogileFS::NewHTTPFile;
-use MogileFS::NewDiskFile;
 
 our $AUTOLOAD;
+
+=head1 METHODS
+
+=head2 new
+
+  $client = MogileFS::Client->new( %OPTIONS );
+
+Creates a new MogileFS::Client object.
+
+Returns MogileFS::Client object on success, or dies on failure.
+
+OPTIONS:
+
+=over
+
+=item hosts
+
+Arrayref of 'host:port' strings to connect to as backend trackers in this client.
+
+=item domain
+
+String representing the mogile domain which this MogileFS client is associated with. (All create/delete/fetch operations
+will be performed against this mogile domain). See the mogadm shell command and its 'domain' category of operations for
+information on manipulating the list of possible domains on a MogileFS system.
+
+=back
+
+=cut
 
 sub new {
     my MogileFS::Client $self = shift;
@@ -23,6 +87,14 @@ sub new {
 
     return $self->_init(@_);
 }
+
+=head2 reload
+
+  $mogc->reload( %OPTIONS )
+
+Re-init the object, like you'd just reconstructed it with 'new', but change it in-place instead.  Useful if you have a system which reloads a config file, and you want to update a singleton $mogc handle's config value.
+
+=cut
 
 sub reload {
     my MogileFS::Client $self = shift;
@@ -40,9 +112,6 @@ sub _init {
     {
         # by default, set readonly off
         $self->{readonly} = $args{readonly} ? 1 : 0;
-
-        # root is only needed for NFS based installations
-        $self->{root} = $args{root};
 
         # get domain (required)
         $self->{domain} = $args{domain} or
@@ -65,15 +134,60 @@ sub _init {
     return $self;
 }
 
+=head2 last_tracker
+
+Returns a scalar of form "ip:port", representing the last mogilefsd
+'tracker' server which was talked to.
+
+=cut
+
+sub last_tracker {
+    my MogileFS::Client $self = shift;
+    return $self->{backend}->last_tracker;
+}
+
+=head2 errstr
+
+Returns string representation of the last error that occured.  It
+includes the error code (same as method 'errcode') and a space before
+the optional English error message.
+
+This isn't necessarily guaranteed to reset after a successful
+operation.  Only call it after another operation returns an error.
+
+
+=cut
+
 sub errstr {
     my MogileFS::Client $self = shift;
     return $self->{backend}->errstr;
 }
 
+=head2 errcode
+
+Returns an error code.  Not a number, but a string identifier
+(e.g. "no_domain") which is stable for use in error handling logic.
+
+This isn't necessarily guaranteed to reset after a successful
+operation.  Only call it after another operation returns an error.
+
+=cut
+
 sub errcode {
     my MogileFS::Client $self = shift;
     return $self->{backend}->errcode;
 }
+
+=head2 readonly
+
+  $is_readonly = $mogc->readonly
+  $mogc->readonly(1)
+
+Getter/setter to mark this client object as read-only.  Purely a local
+operation/restriction, doesn't do a network operation to the mogilefsd
+server.
+
+=cut
 
 sub readonly {
     my MogileFS::Client $self = shift;
@@ -81,14 +195,40 @@ sub readonly {
     return $self->{readonly};
 }
 
-# expects as argument a hashref of "standard-ip" => "preferred-ip"
-sub set_pref_ip {
-    my MogileFS::Client $self = shift;
-    $self->{backend}->set_pref_ip(shift)
-        if $self->{backend};
-}
+=head2 new_file
 
-# returns MogileFS::NewDiskFile object, or undef if no device
+  $mogc->new_file($key)
+  $mogc->new_file($key, $class)
+  $mogc->new_file($key, $class, $opts_hashref)
+
+Start creating a new filehandle with the given key, and option given
+class and options.
+
+Returns a filehandle you should then print to, and later close to
+complete the operation.  B<NOTE:> check the return value from close!
+If your close didn't succeed, the file didn't get saved!
+
+$opts_hashref can contain keys:
+
+=over
+
+=item fid
+
+Explicitly specify the fid number to use, rather than it being automatically allocated.
+
+=item create_open_args
+
+Hashref of extra key/value pairs to send to mogilefsd in create_open phase.
+
+=item create_close_args
+
+Hashref of extra key/value pairs to send to mogilefsd in create_close phase.
+
+=back
+
+=cut
+
+# returns MogileFS::NewHTTPFile object, or undef if no device
 # available for writing
 # ARGS: ( key, class, bytes?, opts? )
 # where bytes is optional and the length of the file and opts is also optional
@@ -102,8 +242,17 @@ sub new_file {
     $bytes += 0;
     $opts ||= {};
 
+    # Extra args to be passed along with the create_open and create_close commands.
+    # Any internally generated args of the same name will overwrite supplied ones in
+    # these hashes.
+    my $create_open_args =  $opts->{create_open_args} || {};
+    my $create_close_args = $opts->{create_close_args} || {};
+
+    $self->run_hook('new_file_start', $self, $key, $class, $opts);
+
     my $res = $self->{backend}->do_request
         ("create_open", {
+            %$create_open_args,
             domain => $self->{domain},
             class  => $class,
             key    => $key,
@@ -125,39 +274,45 @@ sub new_file {
     my $main_dest = shift @$dests;
     my ($main_devid, $main_path) = ($main_dest->[0], $main_dest->[1]);
 
-    # create a MogileFS::NewDiskFile object, based off of IO::File
-    if ($main_path =~ m!^http://!) {
-        return IO::WrapTie::wraptie('MogileFS::NewHTTPFile',
-                                    mg    => $self,
-                                    fid   => $res->{fid},
-                                    path  => $main_path,
-                                    devid => $main_devid,
-                                    backup_dests => $dests,
-                                    class => $class,
-                                    key   => $key,
-                                    content_length => $bytes+0,
-                                    );
-    } else {
-        return MogileFS::NewDiskFile->new(
-                                      mg    => $self,
-                                      fid   => $res->{fid},
-                                      path  => $main_path,
-                                      devid => $main_devid,
-                                      class => $class,
-                                      key   => $key
-                                      );
+    # create a MogileFS::NewHTTPFile object, based off of IO::File
+    unless ($main_path =~ m!^http://!) {
+        Carp::croak("This version of MogileFS::Client no longer supports non-http storage URLs.\n");
     }
+
+    $self->run_hook('new_file_end', $self, $key, $class, $opts);
+
+    return IO::WrapTie::wraptie('MogileFS::NewHTTPFile',
+                                mg    => $self,
+                                fid   => $res->{fid},
+                                path  => $main_path,
+                                devid => $main_devid,
+                                backup_dests => $dests,
+                                class => $class,
+                                key   => $key,
+                                content_length => $bytes+0,
+                                create_close_args => $create_close_args,
+                                );
 }
 
-# Wrapper around new_file, print, and close.
-# Given a key, class, and a filehandle or filename, stores the
-# file contents in MogileFS. Returns the number of bytes stored on
-# success, undef on failure.
+=head2 store_file
+
+  $mogc->store_file($key, $class, $fh_or_filename[, $opts_hash])
+
+Wrapper around new_file, print, and close.
+
+Given a key, class, and a filehandle or filename, stores the file
+contents in MogileFS.  Returns the number of bytes stored on success,
+undef on failure.
+
+=cut
+
 sub store_file {
     my MogileFS::Client $self = shift;
     return undef if $self->{readonly};
 
     my($key, $class, $file, $opts) = @_;
+    $self->run_hook('store_file_start', $self, $key, $class, $opts);
+
     my $fh = $self->new_file($key, $class, undef, $opts) or return;
     my $fh_from;
     if (ref($file)) {
@@ -170,26 +325,60 @@ sub store_file {
         $fh->print($chunk);
         $bytes += $len;
     }
+
+    $self->run_hook('store_file_end', $self, $key, $class, $opts);
+
     close $fh_from unless ref $file;
     $fh->close or return;
     $bytes;
 }
 
-# Wrapper around new_file, print, and close.
-# Given a key, class, and file contents (scalar or scalarref), stores the
-# file contents in MogileFS. Returns the number of bytes stored on
-# success, undef on failure.
+=head2 store_content
+
+    $mogc->store_content($key, $class, $content[, $opts]);
+
+Wrapper around new_file, print, and close.  Given a key, class, and
+file contents (scalar or scalarref), stores the file contents in
+MogileFS. Returns the number of bytes stored on success, undef on
+failure.
+
+=cut
+
 sub store_content {
     my MogileFS::Client $self = shift;
     return undef if $self->{readonly};
 
     my($key, $class, $content, $opts) = @_;
+
+    $self->run_hook('store_content_start', $self, $key, $class, $opts);
+
     my $fh = $self->new_file($key, $class, undef, $opts) or return;
     $content = ref($content) eq 'SCALAR' ? $$content : $content;
     $fh->print($content);
+
+    $self->run_hook('store_content_end', $self, $key, $class, $opts);
+
     $fh->close or return;
     length($content);
 }
+
+=head2 get_paths
+
+  @paths = $mogc->get_paths($key)
+  @paths = $mogc->get_paths($key, $no_verify_bool); # old way
+  @paths = $mogc->get_paths($key, { noverify => $bool }); # new way
+
+Given a key, returns an array of all the locations (HTTP URLs) that
+the file has been replicated to.
+
+If the "no verify" option is set, the mogilefsd tracker doesn't verify
+that the first item returned in the list is up/alive.  Skipping that
+check is faster, so use "noverify" if your application can do it
+faster/smarter.  For instance, when giving L<Perlbal> a list of URLs
+to reproxy to, Perlbal can intelligently find one that's alive, so use
+noverify and get out of mod_perl or whatever as soon as possible.
+
+=cut
 
 # old style calling:
 #   get_paths(key, noverify)
@@ -212,6 +401,8 @@ sub get_paths {
         $noverify = 1 if $opts;
     }
 
+    $self->run_hook('get_paths_start', $self, $key, $opts);
+
     my $res = $self->{backend}->do_request
         ("get_paths", {
             domain => $self->{domain},
@@ -221,9 +412,22 @@ sub get_paths {
         }) or return ();
 
     my @paths = map { $res->{"path$_"} } (1..$res->{paths});
-    return @paths if scalar(@paths) > 0 && $paths[0] =~ m!^http://!;
-    return map { "$self->{root}/$_"} @paths;
+
+    $self->run_hook('get_paths_end', $self, $key, $opts);
+
+    return @paths;
 }
+
+=head2 get_file_data
+
+  $dataref = $mogc->get_file_data($key)
+
+Wrapper around get_paths & LWP, which returns scalarref of file
+contents in a scalarref.
+
+Don't use for large data, as it all comes back to you in one string.
+
+=cut
 
 # given a key, returns a scalar reference pointing at a string containing
 # the contents of the file. takes one parameter; a scalar key to get the
@@ -262,7 +466,14 @@ sub get_file_data {
     return undef;
 }
 
-# TODO: delete method on MogileFS::NewDiskFile object
+=head2 delete
+
+    $mogc->delete($key);
+
+Delete a key from MogileFS.
+
+=cut
+
 # this method returns undef only on a fatal error such as inability to actually
 # delete a resource and inability to contact the server.  attempting to delete
 # something that doesn't exist counts as success, as it doesn't exist.
@@ -285,17 +496,14 @@ sub delete {
     return 1;
 }
 
-# just makes some sleeping happen.  first and only argument is number of
-# seconds to instruct backend thread to sleep for.
-sub sleep {
-    my MogileFS::Client $self = shift;
-    my $duration = shift;
+=head2 rename
 
-    $self->{backend}->do_request("sleep", { duration => $duration + 0 })
-        or return undef;
+  $mogc->rename($oldkey, $newkey);
 
-    return 1;
-}
+Rename file (key) in MogileFS from oldkey to newkey.  Returns true on
+success, failure otherwise.
+
+=cut
 
 # this method renames a file.  it returns an undef on error (only a fatal error
 # is considered as undef; "file didn't exist" isn't an error).
@@ -319,18 +527,25 @@ sub rename {
     return 1;
 }
 
-# used to get a list of keys matching a certain prefix.  expected arguments:
-#   ( $prefix, $after, $limit )
-# prefix specifies what you want to get a list of.  after is the item specified
-# as a return value from this function last time you called it.  limit is optional
-# and defaults to 1000 keys returned.
-#
-# if you expect an array of return values, returns:
-#   ($after, $keys)
-# but if you expect only a single value, you just get the arrayref of keys.  the
-# value $after is to be used as $after when you call this function again.
-#
-# when there are no more keys in the list, you will get back undef(s).
+=head2 list_keys
+
+    @keys = $mogc->list_keys($prefix, $after[, $limit]);
+
+Used to get a list of keys matching a certain prefix.
+
+$prefix specifies what you want to get a list of.  $after is the item
+specified as a return value from this function last time you called
+it.  $limit is optional and defaults to 1000 keys returned.
+
+In list context, returns ($after, $keys).  In scalar context, returns
+arrayref of keys.  The value $after is to be used as $after when you
+call this function again.
+
+When there are no more keys in the list, you will get back undef or
+an empty list.
+
+=cut
+
 sub list_keys {
     my MogileFS::Client $self = shift;
     my ($prefix, $after, $limit) = @_;
@@ -352,14 +567,92 @@ sub list_keys {
     return wantarray ? ($resafter, $reslist) : $reslist;
 }
 
+=head2 foreach_key
+
+  $mogc->foreach_key( %OPTIONS, sub { my $key = shift; ... } );
+  $mogc->foreach_key( prefix => "foo:", sub { my $key = shift; ... } );
+
+
+Functional interface/wrapper around list_keys.
+
+Given some %OPTIONS (currently only one, "prefix"), calls your callback
+for each key matching the provided prefix.
+
+=cut
+
+sub foreach_key {
+    my MogileFS::Client $self = shift;
+    my $callback = pop;
+    Carp::croak("Last parameter not a subref") unless ref $callback eq "CODE";
+    my %opts = @_;
+    my $prefix = delete $opts{prefix};
+    Carp::croak("Unknown option(s): " . join(", ", keys %opts)) if %opts;
+
+    my $last = "";
+    my $max = 1000;
+    my $count = $max;
+
+    while ($count == $max) {
+        my $res = $self->{backend}->do_request
+            ("list_keys", {
+                domain => $self->{domain},
+                prefix => $prefix,
+                after => $last,
+                limit => $max,
+            }) or return undef;
+        $count = $res->{key_count}+0;
+        for (my $i = 1; $i <= $count; $i++) {
+            $callback->($res->{"key_$i"});
+        }
+        $last = $res->{"key_$count"};
+    }
+    return 1;
+}
+
+# just makes some sleeping happen.  first and only argument is number of
+# seconds to instruct backend thread to sleep for.
+sub sleep {
+    my MogileFS::Client $self = shift;
+    my $duration = shift;
+
+    $self->{backend}->do_request("sleep", { duration => $duration + 0 })
+        or return undef;
+
+    return 1;
+}
+
+
+=head2 set_pref_ip
+
+  $mogc->set_pref_ip({ "10.0.0.2" => "10.2.0.2" });
+
+Weird option for old, weird network architecture.  Sets a mapping
+table of preferred alternate IPs, if reachable.  For instance, if
+trying to connect to 10.0.0.2 in the above example, the module would
+instead try to connect to 10.2.0.2 quickly first, then then fall back
+to 10.0.0.2 if 10.2.0.2 wasn't reachable.
+
+=cut
+
+# expects as argument a hashref of "standard-ip" => "preferred-ip"
+sub set_pref_ip {
+    my MogileFS::Client $self = shift;
+    $self->{backend}->set_pref_ip(shift)
+        if $self->{backend};
+}
+
+=head1 PLUGIN METHODS
+
+WRITEME
+
+=cut
+
 # used to support plugins that have modified the server, this builds things into
 # an argument list and passes them back to the server
 # TODO: there is no readonly protection here?  does it matter?  should we check
 # with the server to see what methods they support?  (and if they should be disallowed
 # when the client is in readonly mode?)
 sub AUTOLOAD {
-    my MogileFS::Client $self = shift;
-
     # remove everything up to the last colon, so we only have the method name left
     my $method = $AUTOLOAD;
     $method =~ s/^.*://;
@@ -371,6 +664,7 @@ sub AUTOLOAD {
 
     # create a method to pass this on back
     *{$AUTOLOAD} = sub {
+        my MogileFS::Client $self = shift;
         # pre-assemble the arguments into a hashref
         my $ct = 0;
         my $args = {};
@@ -386,6 +680,50 @@ sub AUTOLOAD {
 
     # now pass through
     goto &$AUTOLOAD;
+}
+
+=head1 HOOKS
+
+=head2 add_hook
+
+WRITEME
+
+=cut
+
+sub add_hook {
+    my MogileFS::Client $self = shift;
+    my $hookname = shift || return;
+
+    if (@_) {
+        $self->{hooks}->{$hookname} = shift;
+    } else {
+        delete $self->{hooks}->{$hookname};
+    }
+}
+
+sub run_hook {
+    my MogileFS::Client $self = shift;
+    my $hookname = shift || return;
+
+    my $hook = $self->{hooks}->{$hookname};
+    return unless $hook;
+
+    eval { $hook->(@_) };
+
+    warn "MogileFS::Client hook '$hookname' threw error: $@\n" if $@;
+}
+
+=head2 add_backend_hook
+
+WRITEME
+
+=cut
+
+sub add_backend_hook {
+    my MogileFS::Client $self = shift;
+    my $backend = $self->{backend};
+
+    $backend->add_hook(@_);
 }
 
 
@@ -413,45 +751,14 @@ sub _debug {
 1;
 __END__
 
-=head1 NAME
+=head1 SEE ALSO
 
-MogileFS::Client - client library for the MogileFS distributed file system
-
-=head1 SYNOPSIS
-
- use MogileFS::Client;
-
- # create client object w/ server-configured namespace and IPs of trackers
- $mogc = MogileFS::Client->new(domain => "foo.com::my_namespace",
-                               hosts  => ['10.0.0.2', '10.0.0.3']);
-
- # create a file
- $key   = "image_of_userid:$userid";   # mogile is a flat namespace.  no paths.
- $class = "user_images";               # must be configured on server
- $fh = $mogc->new_file($key, $class);
-
- print $fh $data;
-
- unless ($fh->close) {
-    die "Error writing file: " . $mogc->errcode . ": " . $mogc->errstr;
- }
-
- # Find the URLs that the file was replicated to.  May change over time.
- @urls = $mogc->get_paths($key);
-
- # no longer want it?
- $mogc->delete($key);
-
- # read source for more methods.  those are the major ones.
-
-=head1 DESCRIPTION
-
-See http://www.danga.com/mogilefs/
+L<http://www.danga.com/mogilefs/>
 
 =head1 COPYRIGHT
 
 This module is Copyright 2003-2004 Brad Fitzpatrick,
-and copyright 2005-2006 Six Apart, Ltd.
+and copyright 2005-2007 Six Apart, Ltd.
 
 All rights reserved.
 

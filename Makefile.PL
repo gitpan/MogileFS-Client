@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 #   Perl Makefile for Danga-Socket
-#   $Id: Makefile.PL 401 2006-09-25 23:00:51Z bradfitz $
+#   $Id: Makefile.PL 825 2007-04-17 04:09:16Z bradfitz $
 #
 #   Invoke with 'perl Makefile.PL'
 #
@@ -13,7 +13,7 @@ use ExtUtils::MakeMaker;
 
 WriteMakefile(
     NAME                    => 'MogileFS::Client',
-    VERSION                 => '1.03',
+    VERSION                 => '1.05',
     AUTHOR                  => 'Brad Fitzpatrick <brad@danga.com>',
     ABSTRACT                => 'MogileFS client library',
     PREREQ_PM               => {

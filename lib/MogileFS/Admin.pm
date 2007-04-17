@@ -42,7 +42,7 @@ sub get_hosts {
     my @ret = ();
     foreach my $ct (1..$res->{hosts}) {
         push @ret, { map { $_ => $res->{"host${ct}_$_"} }
-                     qw(hostid status hostname hostip http_port http_get_port remoteroot altip altmask) };
+                     qw(hostid status hostname hostip http_port http_get_port altip altmask) };
     }
 
     return \@ret;
@@ -58,7 +58,7 @@ sub get_devices {
 
     my @ret = ();
     foreach my $ct (1..$res->{devices}) {
-        push @ret, { (map { $_ => $res->{"dev${ct}_$_"} } qw(devid hostid status)),
+        push @ret, { (map { $_ => $res->{"dev${ct}_$_"} } qw(devid hostid status observed_state utilization)),
                      (map { $_ => $res->{"dev${ct}_$_"}+0 } qw(mb_total mb_used weight)) };
     }
 
@@ -301,6 +301,158 @@ sub change_device_weight {
     return 1;
 }
 
+# returns a hash (list) of key => weight
+sub _get_slave_keys {
+    my MogileFS::Admin $self = shift;
+    my $backend = $self->{backend};
+
+    my $keys_res = $backend->do_request("server_setting", {
+        key => "slave_keys",
+    });
+
+    return () unless $keys_res;
+
+    my %slave_keys;
+
+    foreach my $slave (split /,/, $keys_res->{value}) {
+        my ($key, $weight) = split /=/, $slave, 2;
+
+        # Weight can be zero, so don't default to 1 if it's defined and longer than 0 characters.
+        unless (defined $weight && length $weight) {
+            $weight = 1;
+        }
+
+        $slave_keys{$key} = $weight;
+    }
+
+    return %slave_keys;
+}
+
+# returns a hash (list) of key => options
+sub _set_slave_keys {
+    my MogileFS::Admin $self = shift;
+    my $backend = $self->{backend};
+
+    my %slave_keys = @_;
+
+    my @keys;
+
+    foreach my $key (keys %slave_keys) {
+        my $weight = $slave_keys{$key};
+        if (defined $weight && length $weight && $weight != 1) {
+            $key .= "=$weight";
+        }
+        push @keys, $key;
+    }
+
+    my $keys_res = $backend->do_request("set_server_setting", {
+        key => "slave_keys",
+        value => join(',', @keys),
+    });
+
+    return 0 unless $keys_res;
+    return 1;
+}
+
+# returns a hashref of key => [dsn, username, password] specifying slave nodes which can be connected to.
+sub slave_list {
+    my MogileFS::Admin $self = shift;
+
+    my $backend = $self->{backend};
+
+    my %slave_keys = $self->_get_slave_keys;
+    my %return;
+
+    foreach my $key (keys %slave_keys) {
+        my $slave_res = $backend->do_request("server_setting", {
+            key => "slave_$key",
+        });
+        next unless $slave_res;
+        my ($dsn, $username, $password) = split /\|/, $slave_res->{value};
+        $return{$key} = [$dsn, $username, $password];
+    }
+
+    return \%return;
+}
+
+sub slave_add {
+    my MogileFS::Admin $self = shift;
+    my ($key, $dsn, $username, $password) = @_;
+
+    my $backend = $self->{backend};
+
+    my %slave_keys = $self->_get_slave_keys;
+
+    if (exists $slave_keys{$key}) {
+        return 0;
+    }
+
+    my $res = $backend->do_request("set_server_setting", {
+        key   => "slave_$key",
+        value => join('|', $dsn, $username, $password),
+    }) or return undef;
+
+    $slave_keys{$key} = undef;
+
+    $self->_set_slave_keys(%slave_keys);
+
+    return 1;
+}
+
+sub slave_modify {
+    my MogileFS::Admin $self = shift;
+    my $key = shift;
+    my %opts = @_;
+
+    my $backend = $self->{backend};
+
+    my %slave_keys = $self->_get_slave_keys;
+
+    unless (exists $slave_keys{$key}) {
+        return 0;
+    }
+
+    my $get_res = $backend->do_request("server_setting", {
+        key => "slave_$key",
+    }) or return undef;
+
+    my ($dsn, $username, $password) = split /\|/, $get_res->{value};
+
+    $dsn      = $opts{dsn}      if exists $opts{dsn};
+    $username = $opts{username} if exists $opts{username};
+    $password = $opts{password} if exists $opts{password};
+
+    my $set_res = $backend->do_request("set_server_setting", {
+        key   => "slave_$key",
+        value => join('|', $dsn, $username, $password),
+    }) or return undef;
+
+    return 1;
+}
+
+sub slave_delete {
+    my MogileFS::Admin $self = shift;
+    my $key = shift;
+
+    my $backend = $self->{backend};
+
+    my %slave_keys = $self->_get_slave_keys;
+
+    unless (exists $slave_keys{$key}) {
+        return 0;
+    }
+
+    my $res = $backend->do_request("set_server_setting", {
+        key   => "slave_$key",
+        value => undef,
+    }) or return undef;
+
+    delete $slave_keys{$key};
+
+    $self->_set_slave_keys(%slave_keys);
+
+    return 1;
+}
 
 ################################################################################
 # MogileFS::Admin class methods
@@ -310,7 +462,16 @@ sub _fail {
     croak "MogileFS::Admin: $_[0]";
 }
 
-*_debug = *MogileFS::_debug;
+# FIXME: is this used?
+sub _debug {
+    return 1 unless $MogileFS::DEBUG;
+    my $msg = shift;
+    my $ref = shift;
+    chomp $msg;
+    eval "use Data::Dumper;";
+    print STDERR "$msg\n" . Dumper($ref) . "\n";
+    return 1;
+}
 
 # modify a class within a domain
 sub _mod_class {

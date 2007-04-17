@@ -31,6 +31,7 @@ use fields ('host',
             'backup_dests',
             'bytes_out',      # count of how many bytes we've written to the socket
             'data_in',        # storage for data we've read from the socket
+            'create_close_args',  # Extra arguments hashref for the do_request of create_close during CLOSE
             );
 
 sub path  { _getset(shift, 'path');      }
@@ -62,6 +63,7 @@ sub TIEHANDLE {
     $self->{$_} = $args{$_} foreach qw(mg fid devid class key);
     $self->{bytes_out} = 0;
     $self->{data_in} = '';
+    $self->{create_close_args} = $args{create_close_args} || {};
 
     return $self;
 }
@@ -298,6 +300,7 @@ sub CLOSE {
         if ($line =~ m!^HTTP/\d+\.\d+\s+(\d+)!) {
             # all 2xx responses are success
             unless ($1 >= 200 && $1 <= 299) {
+                my $errcode = $1;
                 # read through to the body
                 my ($found_header, $body);
                 while (defined (my $l = $self->_getline)) {
@@ -310,10 +313,10 @@ sub CLOSE {
                     $body .= " $l";
                 }
                 $body = substr($body, 0, 512) if length $body > 512;
-                return $err->("HTTP response $1 from upload: $body");
+                return $err->("HTTP response $errcode from upload of $self->{uri} to $self->{sock}: $body");
             }
         } else {
-            return $err->("Response line not understood: $line");
+            return $err->("Response line not understood from $self->{sock}: $line");
         }
         $self->{sock}->close;
     }
@@ -325,10 +328,13 @@ sub CLOSE {
     my $devid = $self->{devid};
     my $path  = $self->{path};
 
+    my $create_close_args = $self->{create_close_args};
+
     my $key = shift || $self->{key};
 
     my $rv = $mg->{backend}->do_request
         ("create_close", {
+            %$create_close_args,
             fid    => $fid,
             devid  => $devid,
             domain => $domain,
@@ -393,7 +399,9 @@ sub _fail {
     croak "MogileFS::NewHTTPFile: $_[0]";
 }
 
-*_debug = *MogileFS::_debug;
+sub _debug {
+    MogileFS::Client::_debug(@_);
+}
 
 sub _getset {
     my MogileFS::NewHTTPFile $self = shift;
