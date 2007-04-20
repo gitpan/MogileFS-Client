@@ -454,6 +454,56 @@ sub slave_delete {
     return 1;
 }
 
+sub fsck_start {
+    my MogileFS::Admin $self = shift;
+    return $self->{backend}->do_request("fsck_start", {});
+}
+
+sub fsck_stop {
+    my MogileFS::Admin $self = shift;
+    return $self->{backend}->do_request("fsck_stop", {});
+}
+
+sub fsck_reset {
+    my MogileFS::Admin $self = shift;
+    my %opts = @_;
+    my $polonly = delete $opts{policy_only};
+    Carp::croak("Unknown options: ". join(", ", keys %opts)) if %opts;
+    return $self->{backend}->do_request("fsck_reset", {
+        policy_only => $polonly,
+    });
+}
+
+sub fsck_clearlog {
+    my MogileFS::Admin $self = shift;
+    return $self->{backend}->do_request("fsck_clearlog", {});
+}
+
+sub fsck_status {
+    my MogileFS::Admin $self = shift;
+    return $self->{backend}->do_request("fsck_status", {});
+}
+
+sub fsck_log_rows {
+    my MogileFS::Admin $self = shift;
+    my %args = @_;
+    my $after = delete $args{after_logid};
+    die if %args;
+
+    my $ret = $self->{backend}->do_request("fsck_getlog", {
+        after_logid => $after,
+    });
+    my @ret;
+    for (my $i = 1; $i <= $ret->{row_count}; $i++) {
+        my $rec = {};
+        foreach my $k (qw(logid utime fid evcode devid)) {
+            $rec->{$k} = $ret->{"row_${i}_$k"};
+        }
+        push @ret, $rec;
+    }
+    return @ret;
+}
+
 ################################################################################
 # MogileFS::Admin class methods
 #
