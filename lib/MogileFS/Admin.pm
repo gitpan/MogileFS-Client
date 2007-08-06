@@ -90,6 +90,15 @@ sub list_fids {
     return $ret;
 }
 
+sub clear_cache {
+    my MogileFS::Admin $self = shift;
+    # do the request, default to request all stats if they didn't specify any
+    push @_, 'all' unless @_;
+    my $res = $self->{backend}->do_request("clear_cache", { map { $_ => 1 } @_ })
+        or return undef;
+    return 1;
+}
+
 # get a hashref of statistics on how the MogileFS server is doing.  there are several
 # sections of statistics, in this form:
 # {
@@ -261,6 +270,29 @@ sub create_device {
 
     my $res = $self->{backend}->do_request("create_device", \%opts)
         or return undef;
+
+    return 1;
+}
+
+# edit a device
+sub update_device {
+    my MogileFS::Admin $self = shift;
+    return undef if $self->{readonly};
+    my $host = shift;
+    my $device = shift;
+    return undef unless $host;
+    return undef unless $device;
+
+    my $args = shift;
+    return undef unless ref $args eq 'HASH';
+
+    # TODO: provide a native update_device in the MogileFS::Admin command set.
+    if ($args->{status}){
+        $self->change_device_state($host, $device, $args->{status}) or return undef;
+    }
+    if ($args->{weight}){
+        $self->change_device_weight($host, $device, $args->{weight}) or return undef;
+    }
 
     return 1;
 }
