@@ -12,7 +12,7 @@ use MogileFS::Client;
 
 use fields ('hosts',        # arrayref of "$host:$port" of mogilefsd servers
             'host_dead',    # "$host:$port" -> $time  (of last connect failure)
-            'lasterr',      # string: \w+ identifer of last error
+            'lasterr',      # string: \w+ identifier of last error
             'lasterrstr',   # string: english of last error
             'sock_cache',   # cached socket to mogilefsd tracker
             'pref_ip',      # hashref; { ip => preferred ip }
@@ -159,7 +159,7 @@ sub do_request {
     unless (_wait_for_readability(fileno($sock), $self->{timeout})) {
         close($sock);
         $self->run_hook('do_request_read_timeout', $cmd, $self->{last_host_connected});
-        return _fail("tracker socket never became readable ($self->{last_host_connected}) when sending command: [$req]");
+        return _fail("timed out after $self->{timeout}s against $self->{last_host_connected} when sending command: [$req]");
     }
 
     # guard against externally-modified $/ changes.  patch from

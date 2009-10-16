@@ -12,7 +12,7 @@ MogileFS::Client - Client library for the MogileFS distributed file system.
  # create client object w/ server-configured namespace 
  # and IPs of trackers
  $mogc = MogileFS::Client->new(domain => "foo.com::my_namespace",
-                               hosts  => ['10.0.0.2', '10.0.0.3']);
+                               hosts  => ['10.0.0.2:7001', '10.0.0.3:7001']);
 
  # create a file
  # mogile is a flat namespace.  no paths.
@@ -54,8 +54,9 @@ use fields (
 use Time::HiRes ();
 use MogileFS::Backend;
 use MogileFS::NewHTTPFile;
+use MogileFS::ClientHTTPFile;
 
-our $VERSION = '1.08';
+our $VERSION = '1.09';
 
 our $AUTOLOAD;
 
@@ -154,7 +155,7 @@ sub last_tracker {
 
 =head2 errstr
 
-Returns string representation of the last error that occured.  It
+Returns string representation of the last error that occurred.  It
 includes the error code (same as method 'errcode') and a space before
 the optional English error message.
 
@@ -205,7 +206,8 @@ sub readonly {
 
   $mogc->new_file($key)
   $mogc->new_file($key, $class)
-  $mogc->new_file($key, $class, $opts_hashref)
+  $mogc->new_file($key, $class, $content_length)
+  $mogc->new_file($key, $class, $content_length , $opts_hashref)
 
 Start creating a new filehandle with the given key, and option given
 class and options.
@@ -229,6 +231,13 @@ Hashref of extra key/value pairs to send to mogilefsd in create_open phase.
 =item create_close_args
 
 Hashref of extra key/value pairs to send to mogilefsd in create_close phase.
+
+=item largefile
+
+Use MogileFS::ClientHTTPFile which will not load the entire file into memory
+like the default MogileFS::NewHTTPFile but requires that the storage node
+HTTP servers support the Content-Range header in PUT requests and is a little
+slower.
 
 =back
 
@@ -287,7 +296,9 @@ sub new_file {
 
     $self->run_hook('new_file_end', $self, $key, $class, $opts);
 
-    return IO::WrapTie::wraptie('MogileFS::NewHTTPFile',
+    return IO::WrapTie::wraptie( ( $opts->{largefile}
+            ? 'MogileFS::ClientHTTPFile'
+            : 'MogileFS::NewHTTPFile' ),
                                 mg    => $self,
                                 fid   => $res->{fid},
                                 path  => $main_path,
@@ -297,6 +308,113 @@ sub new_file {
                                 key   => $key,
                                 content_length => $bytes+0,
                                 create_close_args => $create_close_args,
+                                overwrite => 1,
+                            );
+}
+
+=head2 edit_file
+
+  $mogc->edit_file($key, $opts_hashref)
+
+Edit the file with the the given key.
+
+
+B<NOTE:> edit_file is currently EXPERIMENTAL and not recommended for
+production use. MogileFS is primarily designed for storing files
+for later retrieval, rather than editing.  Use of this function may lead to
+poor performance and, until it has been proven mature, should be
+considered to also potentially cause data loss.
+
+B<NOTE:> use of this function requires support for the DAV 'MOVE'
+verb and partial PUT (i.e. Content-Range in PUT) on the back-end
+storage servers (e.g. apache with mod_dav).
+
+Returns a seekable filehandle you can read/write to. Calling this
+function may invalidate some or all URLs you currently have for this
+key, so you should call ->get_paths again afterwards if you need
+them.
+
+On close of the filehandle, the new file contents will replace the
+previous contents (and again invalidate any existing URLs).
+
+By default, the file contents are preserved on open, but you may
+specify the overwrite option to zero the file first. The seek position
+is at the beginning of the file, but you may seek to the end to append.
+
+$opts_hashref can contain keys:
+
+=over
+
+=item overwrite
+
+The edit will overwrite the file, equivalent to opening with '>'.
+Default: false.
+
+=back
+
+=cut
+
+sub edit_file {
+    my MogileFS::Client $self = shift;
+    return undef if $self->{readonly};
+
+    my($key, $opts) = @_;
+
+    my $res = $self->{backend}->do_request
+        ("edit_file", {
+            domain => $self->{domain},
+            key    => $key,
+        }) or return undef;
+
+    my $moveReq = HTTP::Request->new('MOVE', $res->{oldpath});
+    $moveReq->header(Destination => $res->{newpath});
+    my $ua = LWP::UserAgent->new;
+    my $resp = $ua->request($moveReq);
+    unless ($resp->is_success) {
+        warn "Failed to MOVE $res->{oldpath} to $res->{newpath}";
+        return undef;
+    }
+
+    return IO::WrapTie::wraptie('MogileFS::ClientHTTPFile',
+                                mg        => $self,
+                                fid       => $res->{fid},
+                                path      => $res->{newpath},
+                                devid     => $res->{devid},
+                                class     => $res->{class},
+                                key       => $key,
+                                overwrite => $opts->{overwrite},
+                            );
+}
+
+=head2 read_file
+
+  $mogc->read_file($key)
+
+Read the file with the the given key.
+
+Returns a seekable filehandle you can read() from. Note that you cannot
+read line by line using <$fh> notation.
+
+Takes the same options as get_paths (which is called internally to get
+the URIs to read from).
+
+=cut
+
+sub read_file {
+    my MogileFS::Client $self = shift;
+    
+    my @paths = $self->get_paths(@_);
+    
+    my $path = shift @paths;
+
+    return if !$path;
+
+    my @backup_dests = map { [ undef, $_ ] } @paths;
+
+    return IO::WrapTie::wraptie('MogileFS::ClientHTTPFile',
+                                path         => $path,
+                                backup_dests => \@backup_dests,
+                                readonly     => 1,
                                 );
 }
 
@@ -418,11 +536,16 @@ sub get_paths {
 
     # handle parameters, if any
     my ($noverify, $zone);
-    if (ref $opts) {
-        $noverify = 1 if $opts->{noverify};
-        $zone = $opts->{zone} || undef;
-    } else {
-        $noverify = 1 if $opts;
+    unless (ref $opts) {
+        $opts = { noverify => $opts };
+    }
+    my %extra_args;
+
+    $noverify = 1 if $opts->{noverify};
+    $zone = $opts->{zone};
+
+    if (my $pathcount = delete $opts->{pathcount}) {
+        $extra_args{pathcount} = $pathcount;
     }
 
     $self->run_hook('get_paths_start', $self, $key, $opts);
@@ -433,6 +556,7 @@ sub get_paths {
             key    => $key,
             noverify => $noverify ? 1 : 0,
             zone   => $zone,
+	    %extra_args,
         }) or return ();
 
     my @paths = map { $res->{"path$_"} } (1..$res->{paths});
