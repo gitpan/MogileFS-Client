@@ -1,3 +1,14 @@
+1.11 - 2010-04-02
+
+        * Support replpolicy as an argument to class add/modify (dormando)
+
+        * Don't reuse dead socket on more error conditions (t0m)
+
+        * Add chunk_size option for store_file to speed up large uploads
+          (dormando)
+
+        * Add extra info to write failure errors (t0m)
+
 1.10 - 2009-12-05
 
         * Support sending a timeout for admin commands (robbat2)
