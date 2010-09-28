@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               MogileFS-Client
-version:            1.12
+version:            1.13
 abstract:           MogileFS client library
 author:
     - Brad Fitzpatrick <brad@danga.com>
