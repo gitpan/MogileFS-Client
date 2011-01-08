@@ -56,7 +56,7 @@ use MogileFS::Backend;
 use MogileFS::NewHTTPFile;
 use MogileFS::ClientHTTPFile;
 
-our $VERSION = '1.13';
+our $VERSION = '1.14';
 
 our $AUTOLOAD;
 
@@ -687,6 +687,63 @@ sub rename {
                         $self->{backend}->{lasterr} eq 'unknown_key';
 
     return 1;
+}
+
+=head2 file_debug
+
+    my $info_gob = $mogc->file_debug(fid => $fid);
+    ... or ...
+    my $info_gob = $mogc->file_debug(key => $key);
+
+Thoroughly search for any database notes about a particular fid. Searchable by
+raw fidid, or by domain and key. B<Use sparingly>. Command hits the master
+database numerous times, and if you're using it in production something is
+likely very wrong.
+
+To be used with troubleshooting broken/odd files and errors from mogilefsd.
+
+=cut
+
+sub file_debug {
+    my MogileFS::Client $self = shift;
+    my %opts = @_;
+    $opts{domain} = $self->{domain} unless exists $opts{domain};
+
+    my $res = $self->{backend}->do_request
+        ("file_debug", {
+            %opts,
+        }) or return undef;
+    return $res;
+}
+
+=head2 file_info
+
+    my $fid = $mogc->file_info($key, { devices => 0 });
+
+Used to return metadata about a file. Returns the domain, class, expected
+length, devcount, etc. Optionally device ids (not paths) can be returned as
+well.
+
+Should be used for informational purposes, and not usually for dynamically
+serving files.
+
+=cut
+
+sub file_info {
+    my MogileFS::Client $self = shift;
+    my ($key, $opts) = @_;
+
+    my %extra = ();
+    $extra{devices} = delete $opts->{devices};
+    die "Unknown arguments: " . join(', ', keys %$opts) if keys %$opts;
+
+    my $res = $self->{backend}->do_request
+        ("file_info", {
+            domain => $self->{domain},
+            key    => $key,
+            %extra,
+        }) or return undef;
+    return $res;
 }
 
 =head2 list_keys
