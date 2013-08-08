@@ -17,10 +17,12 @@ WriteMakefile(
     AUTHOR                  => 'Brad Fitzpatrick <brad@danga.com>',
     ABSTRACT                => 'MogileFS client library',
     PREREQ_PM               => {
+        'Time::HiRes'     => 0,
         'IO::WrapTie'     => '2.102',
         'LWP::Simple'     => 0,
         fields            => 0,
         'Test::More'      => 0,
+        'List::Util'      => 0,
     },
 );
 

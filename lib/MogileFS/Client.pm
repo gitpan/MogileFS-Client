@@ -56,7 +56,7 @@ use MogileFS::Backend;
 use MogileFS::NewHTTPFile;
 use MogileFS::ClientHTTPFile;
 
-our $VERSION = '1.16';
+our $VERSION = '1.17';
 
 our $AUTOLOAD;
 
@@ -183,6 +183,20 @@ operation.  Only call it after another operation returns an error.
 sub errcode {
     my MogileFS::Client $self = shift;
     return $self->{backend}->errcode;
+}
+
+=head2 force_disconnect
+
+Forces the client to disconnect from the tracker, causing it to reconnect
+when the next request is made.  It will reconnect to a different tracker if
+possible.  A paranoid application may wish to do to this before retrying a
+failed command, on the off chance that another tracker may be working better.
+
+=cut
+
+sub force_disconnect {
+    my MogileFS::Client $self = shift;
+    return $self->{backend}->force_disconnect();
 }
 
 =head2 readonly
